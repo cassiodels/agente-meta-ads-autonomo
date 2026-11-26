@@ -1,0 +1,37 @@
+{
+  "account_name": "Cliente Exemplo",
+  "meta_ad_account_id": "act_000000000000",
+  "meta_assets": {
+    "page_id": "",
+    "instagram_user_id": "",
+    "lead_gen_form_id": "",
+    "default_campaign_id": "",
+    "default_adset_id": ""
+  },
+  "campaign_defaults": {
+    "objective": "OUTCOME_LEADS",
+    "destination_url": "",
+    "default_cta": "APPLY_NOW"
+  },
+  "targeting": {
+    "country": "BR",
+    "region_note": "Brasil inteiro",
+    "age_min": 18,
+    "age_max": 55,
+    "gender": "todos"
+  },
+  "budget": {
+    "monthly_max_brl": 200.0,
+    "currency": "BRL",
+    "require_approval_for_budget_changes": true
+  },
+  "guardrails": {
+    "min_learning_phase_days": 3,
+    "max_daily_budget_change_pct": 20.0,
+    "max_acceptable_cpa_brl": 10.0
+  },
+  "notifications": {
+    "channel": "telegram",
+    "daily_report_hour": "08:00"
+  }
+}

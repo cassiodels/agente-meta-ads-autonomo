@@ -1,0 +1,15 @@
+[Unit]
+Description=Agente Meta Ads - Bot Interativo do Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agente-meta-ads-autonomo
+ExecStart=/home/ubuntu/agente-meta-ads-autonomo/venv/bin/python -m core.telegram_interactive_bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

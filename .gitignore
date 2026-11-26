@@ -1,0 +1,31 @@
+# Ambientes Virtuais
+venv/
+.venv/
+env/
+
+# Configurações sensíveis e chaves de API
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Dados isolados de clientes reais (mantendo apenas o modelo no git)
+accounts/*
+!accounts/cliente_modelo/
+
+# Cache e logs locais de modelos/tokens
+config/.models_cache.json
+config/.usage.json
+
+# IDE / Sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

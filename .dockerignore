@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+accounts/*
+!accounts/cliente_modelo/
+config/.models_cache.json
+config/.usage.json
+.vscode/
+.idea/

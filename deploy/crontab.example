@@ -1,0 +1,8 @@
+# Agendamento (crontab -e) para VPS Linux
+# Ajuste o caminho /home/ubuntu/agente-meta-ads-autonomo conforme o seu servidor.
+
+# Todo dia às 08:00 — envia o relatório diário e analisa novos criativos
+0 8 * * * cd /home/ubuntu/agente-meta-ads-autonomo && /home/ubuntu/agente-meta-ads-autonomo/venv/bin/python main.py >> logs/daily.log 2>&1
+
+# Todo dia 1º do mês às 09:00 — gera o relatório mensal simplificado
+0 9 1 * * cd /home/ubuntu/agente-meta-ads-autonomo && /home/ubuntu/agente-meta-ads-autonomo/venv/bin/python -m core.skills.monthly_report >> logs/monthly.log 2>&1

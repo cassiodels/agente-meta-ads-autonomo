@@ -1,0 +1,26 @@
+services:
+  bot:
+    build: .
+    container_name: agente-meta-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python -m core.telegram_interactive_bot
+    volumes:
+      - ./accounts:/app/accounts
+      - ./config:/app/config
+      - ./.env:/app/.env
+
+  panel:
+    build: .
+    container_name: agente-meta-panel
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./accounts:/app/accounts
+      - ./config:/app/config
+      - ./.env:/app/.env

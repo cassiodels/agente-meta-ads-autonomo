@@ -1,0 +1,8 @@
+{
+  "_comment": "Ordem de preferência. O agente consulta a API de modelos e pula os que não existirem mais.",
+  "preferred": ["gemini-4-hydrogen"],
+  "fallback": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
+  "retry_delays_seconds": [2, 5],
+  "max_output_tokens": 1500,
+  "model_list_cache_hours": 24
+}
