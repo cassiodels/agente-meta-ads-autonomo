@@ -10,12 +10,34 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from dotenv import load_dotenv, set_key
+from dotenv import load_dotenv
 import streamlit as st
 
 from core.skills.copy_refiner import CopyRefiner
 
-load_dotenv()
+load_dotenv(override=True)
+
+
+def _update_env_in_place(env_path: Path, updates: dict) -> None:
+    """Atualiza chaves diretamente no arquivo .env sem usar arquivo temporário/os.replace
+    (evita Errno 16 Device or resource busy em bind mounts de arquivo único no Docker)."""
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    remaining = {k: str(v).strip() for k, v in updates.items()}
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in line:
+            key = line.split("=", 1)[0].strip()
+            if key in remaining:
+                new_lines.append(f"{key}={remaining.pop(key)}")
+                continue
+        new_lines.append(line)
+    for key, val in remaining.items():
+        new_lines.append(f"{key}={val}")
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(new_lines) + "\n")
+    for key, val in updates.items():
+        os.environ[key] = str(val).strip()
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -341,10 +363,12 @@ with tab_config:
             }
             config_file.write_text(json.dumps(config_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            set_key(str(ENV_PATH), "META_ACCESS_TOKEN", meta_token)
-            set_key(str(ENV_PATH), "TELEGRAM_BOT_TOKEN", tg_token)
-            set_key(str(ENV_PATH), "TELEGRAM_CHAT_ID", tg_chat_id.strip())
-            set_key(str(ENV_PATH), "GEMINI_API_KEY", gemini_token)
+            _update_env_in_place(ENV_PATH, {
+                "META_ACCESS_TOKEN": meta_token,
+                "TELEGRAM_BOT_TOKEN": tg_token,
+                "TELEGRAM_CHAT_ID": tg_chat_id.strip(),
+                "GEMINI_API_KEY": gemini_token,
+            })
             st.success("✅ Configurações, travas, segmentação, ativos e tokens salvos com sucesso!")
 
 # ------------------------------------------------------------------ ABA 4: ATUALIZAÇÕES
