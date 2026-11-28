@@ -1,12 +1,8 @@
 """
 Bot Interativo do Telegram com fila de navegação multi-cliente.
-
-Fluxo:
-- Central de Operações -> Auditar cliente (mostra diagnóstico real do AdAuditor)
-- Ações disponíveis:
-  - Cold Start: criar campanha + conjunto inicial PAUSED
-  - Stop-Loss: pausar anúncio específico com CPA alto
-  - Criativos (Imagem ou Vídeo com 1º frame como capa): Gerar proposta -> [Aprovar / Ajustar / Rejeitar] -> [Ativar Agora]
+- Mostra orçamento consolidado real da conta (Teto, Gasto, Comprometido Ativo, Projeção e Folga).
+- Escolhe autonomamente o melhor criativo do catálogo pré-analisado com base nos insights.
+- Permite trocar o criativo escolhido (🔀 Trocar Criativo), ajustar copy (✏️ Ajustar) e publicar em 2 etapas (PAUSED -> ACTIVE).
 Segurança: apenas o TELEGRAM_CHAT_ID autorizado é atendido.
 """
 import os
@@ -21,6 +17,7 @@ from core.agency_hub import AgencyHub
 from core.asset_manager import AssetManager
 from core.memory_manager import MemoryManager
 from core.meta_client import MetaClient, MetaTokenExpiredError
+from core.rules_engine import RulesEngine
 from core.skills.ad_auditor import AdAuditor
 from core.skills.copy_refiner import CopyRefiner, AIUnavailableError
 from core.skills.compliance_guard import ComplianceGuard
@@ -114,15 +111,25 @@ class TelegramInteractiveBot:
         menu = self.hub.format_central_menu(overview)
         self.send_message(menu["text"], menu["reply_markup"])
 
-    def _audit_single_account(self, folder: str, cfg: dict, new_assets: list) -> dict:
+    def _collect_account_diagnosis(self, folder: str, cfg: dict, new_assets: list) -> dict:
         memory = MemoryManager(ACCOUNTS_DIR / folder / "memory.json").load()
         auditor = AdAuditor(cfg, memory, folder_name=folder)
+        rules = RulesEngine(cfg)
         meta = MetaClient(self.meta_token, cfg.get("meta_ad_account_id", ""))
+
         insights_7d = meta.get_insights("last_7d")
+        insights_month = meta.get_insights("this_month")
+        insights_today = meta.get_insights("today")
         campaigns = meta.get_campaigns()
+        adsets = meta.get_adsets()
         ad_insights = meta.get_ad_insights("last_7d")
         ads = meta.get_ads()
-        return auditor.evaluate_account_strategy(
+
+        month_spend = float(insights_month[0].get("spend", 0.0)) if insights_month else 0.0
+        today_spend = float(insights_today[0].get("spend", 0.0)) if insights_today else 0.0
+        budget_status = rules.evaluate_consolidated_account_budget(month_spend, today_spend, campaigns, adsets)
+
+        diag = auditor.evaluate_account_strategy(
             insights_7d=insights_7d[0] if insights_7d else {},
             campaigns=campaigns,
             available_assets=new_assets,
@@ -130,27 +137,41 @@ class TelegramInteractiveBot:
             active_ads=ads,
             folder_name=folder,
         )
+        return {"diag": diag, "budget": budget_status}
 
     def show_account(self, folder: str, message_id: int = None):
         self._refresh_env_tokens()
         account_dir = ACCOUNTS_DIR / folder
         cfg = _read_json(account_dir / "config.json", {})
         state = _read_json(account_dir / "state.json", {})
-        new_assets = AssetManager(account_dir).scan_new_assets()
+        asset_mgr = AssetManager(account_dir)
+        new_assets = asset_mgr.scan_new_assets()
+        cataloged = asset_mgr.get_available_cataloged_entries()
         default_adset = (cfg.get("meta_assets") or {}).get("default_adset_id", "")
 
         lines = [
             f"📂 *{cfg.get('account_name', folder)}*",
             "━━━━━━━━━━━━━━━━━━━━",
-            f"• Teto mensal: R$ {cfg.get('budget', {}).get('monthly_max_brl', 0):.2f}",
-            f"• Criativos novos na pasta: {len(new_assets)}",
+            f"• Criativos disponíveis: {len(new_assets)} ({len(cataloged)} catalogados com IA)",
         ]
         buttons = []
 
         try:
-            diag = self._audit_single_account(folder, cfg, new_assets)
-            lines.append(f"• Diagnóstico: `{diag['action']}`")
-            lines.append(f"• Motivo: _{diag.get('reason', '')}_")
+            info = self._collect_account_diagnosis(folder, cfg, new_assets)
+            b = info["budget"]
+            diag = info["diag"]
+            lines.extend([
+                f"💰 *Orçamento Consolidado da Conta:*",
+                f"   • Teto Mensal: R$ {b['monthly_max']:.2f} | Gasto Mês: R$ {b['current_month_spend']:.2f}",
+                f"   • Ativos Hoje: R$ {b['active_daily_total']:.2f}/dia | Projeção Mês: R$ {b['projected_month_total']:.2f}",
+                f"   • Folga Real: *R$ {b['available_monthly_budget']:.2f}* (até R$ {b['available_daily_budget']:.2f}/dia)",
+                f"   • Topologia: _{b['recommended_topology']}_",
+                "",
+                f"🧠 *Diagnóstico:* `{diag['action']}`",
+                f"   • {diag.get('reason', '')}",
+            ])
+            if b.get("alert"):
+                lines.append(f"\n{b['alert']}")
             if diag.get("briefing"):
                 lines.append(f"\n{diag['briefing']}")
             if diag["action"] == "PAUSAR_ANUNCIO" and diag.get("target_ad_id"):
@@ -166,15 +187,15 @@ class TelegramInteractiveBot:
         except MetaTokenExpiredError:
             lines.append("🔑 *Token da Meta expirado!* Atualize no Painel Web.")
         except Exception as e:
-            lines.append(f"⚠️ Erro ao consultar conta: {str(e)[:120]}")
+            lines.append(f"⚠️ Erro ao consultar conta: {str(e)[:140]}")
 
         if state.get("pending_proposal"):
-            lines.append("• ⏳ Há uma proposta aguardando sua decisão.")
+            lines.append("\n⏳ Há uma proposta aguardando sua decisão.")
             buttons.append([{"text": "📝 Rever proposta pendente", "callback_data": f"review_{folder}"}])
         if state.get("paused_pending_activation"):
             buttons.append([{"text": "🚀 Ativar anúncio pausado pendente", "callback_data": f"activate_{folder}"}])
         if new_assets:
-            buttons.append([{"text": "✨ Analisar criativo e gerar copy", "callback_data": f"generate_{folder}"}])
+            buttons.append([{"text": "✨ Sugerir Melhor Criativo e Gerar Copy", "callback_data": f"generate_{folder}"}])
         buttons.append([{"text": "🔙 Voltar à Central", "callback_data": "menu_central"}])
 
         markup = {"inline_keyboard": buttons}
@@ -210,28 +231,34 @@ class TelegramInteractiveBot:
 
         check = self.guard.validate_ad(ad.get("primary_text", ""), ad.get("headline", ""))
         compliance = "✅ Conforme" if check["compliant"] else "❌ " + "; ".join(check["reasons"])
+        selection_line = f"\n🧠 Escolha estratégica: {ad['selection_reason']}\n" if ad.get("selection_reason") else ""
         note = f"\n\n🔧 Ajuste aplicado: {ad['refined_note']}" if ad.get("refined_note") else ""
         text = (
-            f"PROPOSTA DE ANÚNCIO ({ad.get('media_type', 'image').upper()})\n\n"
+            f"PROPOSTA DE ANÚNCIO ({ad.get('media_type', 'image').upper()}) — {prop['asset']}\n"
+            f"{selection_line}\n"
             f"Ângulo: {ad.get('angle', '-')}\n"
             f"Compliance Meta: {compliance}\n\n"
             f"Título: {ad.get('headline')}\n\n"
             f"Texto:\n{ad.get('primary_text')}\n\n"
             f"CTA: {ad.get('call_to_action')}{note}"
         )
-        buttons = {"inline_keyboard": [
-            [{"text": "✅ Aprovar", "callback_data": f"approve_{folder}"},
-             {"text": "✏️ Ajustar", "callback_data": f"adjust_{folder}"}],
-            [{"text": "❌ Rejeitar", "callback_data": f"reject_{folder}"}],
-            [{"text": "🔙 Voltar à Central", "callback_data": "menu_central"}],
-        ]}
+        available_assets = AssetManager(account_dir).scan_new_assets()
+        row1 = [
+            {"text": "✅ Aprovar", "callback_data": f"approve_{folder}"},
+            {"text": "✏️ Ajustar", "callback_data": f"adjust_{folder}"},
+        ]
+        row2 = [{"text": "❌ Rejeitar", "callback_data": f"reject_{folder}"}]
+        if len(available_assets) > 1:
+            row2.insert(0, {"text": "🔀 Trocar Criativo", "callback_data": f"swap|{folder}"})
+        buttons = {"inline_keyboard": [row1, row2, [{"text": "🔙 Voltar à Central", "callback_data": "menu_central"}]]}
         self.send_message(text, buttons, markdown=False)
 
     # ------------------------------------------------------------------ ações
-    def generate_proposal(self, folder: str):
+    def generate_proposal(self, folder: str, forced_asset_name: str = ""):
         self._refresh_env_tokens()
         account_dir = ACCOUNTS_DIR / folder
-        assets = AssetManager(account_dir).scan_new_assets()
+        asset_mgr = AssetManager(account_dir)
+        assets = asset_mgr.scan_new_assets()
         if not assets:
             self.send_message("Nenhum criativo novo na pasta assets.", markdown=False)
             return
@@ -245,28 +272,80 @@ class TelegramInteractiveBot:
 
         mem_mgr = MemoryManager(account_dir / "memory.json")
         memory = mem_mgr.load()
-
-        self.send_message("🧠 Analisando o criativo (imagem ou frames do vídeo), aguarde...", markdown=False)
+        top_insights = mem_mgr.get_top_insights()
         refiner = CopyRefiner(persona, memory, self.gemini_key)
-        try:
-            ad = refiner.create_proposal_from_media(
-                assets[0],
-                top_insights=mem_mgr.get_top_insights(),
-                mandatory_notes=mandatory_notes,
-                default_cta=default_cta,
-            )
-        except AIUnavailableError:
-            self.send_message(
-                "⚠️ A IA (Gemini) está sobrecarregada agora e não consegui analisar o criativo. "
-                "Nada foi alterado. Tente de novo em alguns minutos.",
-                markdown=False,
-            )
-            return
+
+        catalog_entries = asset_mgr.get_available_cataloged_entries()
+        use_catalog = (not forced_asset_name) and bool(catalog_entries)
+
+        if use_catalog:
+            self.send_message("🧠 Escolhendo o melhor criativo do catálogo com base nos insights da conta...", markdown=False)
+            try:
+                info = self._collect_account_diagnosis(folder, cfg, assets)
+                b = info["budget"]
+                account_context = (
+                    f"Diagnóstico: {info['diag'].get('action')} ({info['diag'].get('reason')})\n"
+                    f"Orçamento: Gasto Mês R$ {b['current_month_spend']:.2f} / Teto R$ {b['monthly_max']:.2f} | "
+                    f"Projeção R$ {b['projected_month_total']:.2f} | Folga Real R$ {b['available_monthly_budget']:.2f}\n"
+                    f"Topologia recomendada: {b['recommended_topology']}"
+                )
+            except Exception as e:
+                account_context = f"Resumo indisponível momentaneamente ({e}). Escolher criativo de maior potencial geral."
+
+            try:
+                chosen_name, ad = refiner.select_best_asset_and_generate_ad(
+                    catalog_entries=catalog_entries,
+                    account_context=account_context,
+                    top_insights=top_insights,
+                    mandatory_notes=mandatory_notes,
+                    default_cta=default_cta,
+                )
+            except AIUnavailableError:
+                self.send_message(
+                    "⚠️ A IA (Gemini) está sobrecarregada agora e não consegui montar a proposta. Tente em alguns minutos.",
+                    markdown=False,
+                )
+                return
+        else:
+            target = next((a for a in assets if a.name == forced_asset_name), assets[0])
+            chosen_name = target.name
+            self.send_message(f"🧠 Analisando o criativo '{chosen_name}', aguarde...", markdown=False)
+            try:
+                ad = refiner.create_proposal_from_media(
+                    target,
+                    top_insights=top_insights,
+                    mandatory_notes=mandatory_notes,
+                    default_cta=default_cta,
+                )
+            except AIUnavailableError:
+                self.send_message(
+                    "⚠️ A IA (Gemini) está sobrecarregada agora e não consegui analisar o criativo. Tente em alguns minutos.",
+                    markdown=False,
+                )
+                return
 
         state = _read_json(account_dir / "state.json", {})
-        state["pending_proposal"] = {"asset": assets[0].name, "ad": ad, "created_at": datetime.now().isoformat()}
+        state["pending_proposal"] = {"asset": chosen_name, "ad": ad, "created_at": datetime.now().isoformat()}
         _write_json(account_dir / "state.json", state)
         self.send_proposal(folder)
+
+    def show_swap_options(self, folder: str):
+        account_dir = ACCOUNTS_DIR / folder
+        asset_mgr = AssetManager(account_dir)
+        assets = asset_mgr.scan_new_assets()
+        catalog = asset_mgr.load_catalog()
+        if not assets:
+            self.send_message("Nenhum criativo disponível para troca.", markdown=False)
+            return
+
+        buttons = []
+        for idx, asset in enumerate(assets):
+            entry = catalog.get(asset.name, {})
+            tag = f" ({entry['theme']})" if entry.get("theme") else ""
+            label = f"🎯 {asset.name[:24]}{tag[:25]}"
+            buttons.append([{"text": label, "callback_data": f"pick|{folder}|{idx}"}])
+        buttons.append([{"text": "🔙 Cancelar e rever atual", "callback_data": f"review_{folder}"}])
+        self.send_message("🔀 Escolha outro criativo disponível nesta conta:", {"inline_keyboard": buttons}, markdown=False)
 
     def apply_feedback(self, folder: str, feedback: str):
         self._refresh_env_tokens()
@@ -377,10 +456,11 @@ class TelegramInteractiveBot:
             {**pending, "status": "ACTIVE", "activated_at": datetime.now().isoformat()}
         )
         _write_json(account_dir / "state.json", state)
+        bh = res["budget_health"]
         self.send_message(
             f"🟢 Anúncio {res['ad_id']} ATIVADO na Meta Ads!\n"
-            f"Gasto do mês: R$ {res['budget_health']['current_month_spend']:.2f} / "
-            f"Teto: R$ {res['budget_health']['monthly_max']:.2f}",
+            f"Gasto do mês: R$ {bh['current_month_spend']:.2f} | "
+            f"Projeção: R$ {bh['projected_month_total']:.2f} / Teto: R$ {bh['monthly_max']:.2f}",
             markdown=False,
         )
         self.send_hub_menu()
@@ -450,6 +530,15 @@ class TelegramInteractiveBot:
             self.show_account(folder, message_id)
         elif action == "generate":
             self.generate_proposal(folder)
+        elif action == "swap":
+            self.show_swap_options(folder)
+        elif action == "pick" and extra != "":
+            assets = AssetManager(ACCOUNTS_DIR / folder).scan_new_assets()
+            idx = int(extra)
+            if 0 <= idx < len(assets):
+                self.generate_proposal(folder, forced_asset_name=assets[idx].name)
+            else:
+                self.send_message("Criativo não encontrado na fila atual.", markdown=False)
         elif action == "review":
             self.send_proposal(folder)
         elif action == "adjust":

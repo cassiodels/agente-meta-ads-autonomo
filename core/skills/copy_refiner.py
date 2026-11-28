@@ -1,7 +1,10 @@
 """
-Skill 3: CopyRefiner (O Redator com Visão Multimodal, Suporte a Vídeo, Persona Optimizer e Loop de Feedback).
-Gera e refina copys utilizando a memória rankeada e permite ao usuário sugerir edições via Telegram.
+Skill 3: CopyRefiner (Visão Multimodal, Catálogo de Criativos, Seleção Autônoma e Loop de Feedback).
+- Cataloga cada mídia (imagem ou vídeo) 1 única vez em assets_catalog.json.
+- Seleciona autonomamente o melhor criativo do catálogo com base nos insights da conta (sem reenviar imagens!).
+- Refina copys com feedback humano e otimiza a persona estruturada para revisão.
 """
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from PIL import Image
@@ -28,6 +31,120 @@ class CopyRefiner:
             img.thumbnail((max_px, max_px))
         return img
 
+    def catalog_media(self, media_path: Path) -> Dict[str, Any]:
+        """
+        Inspeciona visualmente a mídia uma única vez e devolve a ficha estruturada
+        para salvar em assets_catalog.json.
+        """
+        is_video = is_video_file(media_path)
+        if is_video:
+            thumb_path, vision_media = extract_video_frames(media_path)
+            media_hint = (
+                "MÍDIA: VÍDEO. A 1ª imagem é o 1º frame (capa escolhida pelo usuário) "
+                "e as seguintes mostram o decorrer do vídeo."
+            )
+        else:
+            thumb_path = None
+            vision_media = [self._prepare_image_for_vision(media_path)]
+            media_hint = "MÍDIA: IMAGEM ESTÁTICA."
+
+        prompt = f"""
+Você é um especialista em criativos de Meta Ads.
+Analise a mídia anexada considerando o negócio descrito na persona abaixo e crie uma ficha de catalogação curta e objetiva.
+
+{media_hint}
+
+PERSONA DA MARCA:
+{self.persona_text[:1500]}
+
+Responda em JSON estrito:
+{{
+  "visual_summary": "Resumo claro do que aparece na imagem/vídeo e estilo visual",
+  "theme": "Tema ou produto/oferta principal em 3 a 6 palavras",
+  "suggested_angle": "Ângulo de comunicação que combina melhor com este criativo",
+  "best_for": "Em qual cenário estratégico usar (ex: público frio, remarketing, quebra de padrão, prova social, gancho direto)"
+}}
+"""
+        data = self._generate_json([*vision_media, prompt])
+        return {
+            "media_type": "video" if is_video else "image",
+            "preview_image_path": str(thumb_path) if thumb_path else "",
+            "visual_summary": data.get("visual_summary", ""),
+            "theme": data.get("theme", ""),
+            "suggested_angle": data.get("suggested_angle", ""),
+            "best_for": data.get("best_for", ""),
+            "cataloged_at": datetime.now().isoformat(),
+        }
+
+    def select_best_asset_and_generate_ad(
+        self,
+        catalog_entries: Dict[str, Any],
+        account_context: str,
+        top_insights: List[str],
+        mandatory_notes: str = "",
+        default_cta: str = "APPLY_NOW",
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Escolhe autonomamente o melhor criativo do catálogo cruzando insights da conta + memória
+        (usando apenas o texto do catálogo — zero tokens de imagem!) e gera a copy.
+        """
+        insights = "\n".join(top_insights)
+        winners = self.memory_data.get("angulos_testados", {})
+        notes_block = f"\nOBSERVAÇÕES E REGRAS OBRIGATÓRIAS DO NEGÓCIO:\n{mandatory_notes}\n" if mandatory_notes else ""
+
+        compact_catalog = {
+            name: {
+                "media_type": entry.get("media_type"),
+                "theme": entry.get("theme"),
+                "visual_summary": entry.get("visual_summary"),
+                "suggested_angle": entry.get("suggested_angle"),
+                "best_for": entry.get("best_for"),
+            }
+            for name, entry in catalog_entries.items()
+        }
+
+        prompt = f"""
+Você é um estrategista sênior de Meta Ads e Copywriter.
+Com base nos dados atuais da conta, escolha O MELHOR criativo do catálogo abaixo e escreva o anúncio completo.
+
+CONTEXTO ATUAL DA CONTA (MÉTRICAS, DIAGNÓSTICO E ORÇAMENTO):
+{account_context}
+
+CATÁLOGO DE CRIATIVOS DISPONÍVEIS:
+{compact_catalog}
+
+DIRETRIZES DA MARCA (PERSONA):
+{self.persona_text}
+{notes_block}
+MEMÓRIA DE APRENDIZADO DA CONTA (TOP 10 POR IMPORTÂNCIA):
+{insights}
+Ângulos com histórico de sucesso: {winners}
+
+Responda em JSON estrito:
+{{
+  "chosen_asset": "nome EXATO de uma das chaves do catálogo acima",
+  "selection_reason": "Explicação curta e prática de por que este criativo é o melhor para o momento da conta",
+  "visual_analysis": "Resumo visual do criativo escolhido",
+  "angle": "Ângulo persuasivo escolhido",
+  "headline": "Título curto de alto impacto",
+  "primary_text": "Texto principal completo respeitando a persona e observações obrigatórias",
+  "call_to_action": "{default_cta}",
+  "compliance_status": "CONFORME"
+}}
+"""
+        res = self._generate_json(prompt)
+        chosen = res.get("chosen_asset", "")
+        if chosen not in catalog_entries:
+            chosen = next(iter(catalog_entries))
+
+        entry = catalog_entries[chosen]
+        res["media_type"] = entry.get("media_type", "image")
+        if entry.get("preview_image_path"):
+            res["preview_image_path"] = entry["preview_image_path"]
+        if not res.get("visual_analysis"):
+            res["visual_analysis"] = entry.get("visual_summary", "")
+        return chosen, res
+
     def create_proposal_from_media(
         self,
         media_path: Path,
@@ -35,7 +152,7 @@ class CopyRefiner:
         mandatory_notes: str = "",
         default_cta: str = "APPLY_NOW",
     ) -> Dict[str, Any]:
-        """Analisa imagem ou vídeo (1º frame + até 2 frames) e gera proposta de anúncio."""
+        """Analisa imagem ou vídeo diretamente (usado quando ainda não há catálogo ou na troca manual)."""
         winners = self.memory_data.get("angulos_testados", {})
         if top_insights is None:
             ranked = sorted(
@@ -76,7 +193,7 @@ MEMÓRIA DE APRENDIZADO DA CONTA (TOP 10 POR IMPORTÂNCIA):
 
 REGRAS:
 1. Siga exatamente o tom de voz, público-alvo e diferenciais descritos na Persona da marca.
-2. Cumpra todas as observações/regras obrigatórias da marca e todas as políticas da Meta (sem promessas garantidas ou enganosas).
+2. Cumpra todas as observações/regras obrigatórias da marca e todas as políticas da Meta.
 3. Responda em formato JSON estrito:
 {{
   "visual_analysis": "O que você viu na mídia (imagem ou sequência de frames do vídeo)",
@@ -130,10 +247,7 @@ Responda em formato JSON:
         return current_copy
 
     def optimize_persona(self, form_data: Dict[str, Any]) -> Tuple[str, bool]:
-        """
-        Estrutura os campos preenchidos pelo usuário no painel em um persona.md otimizado.
-        Retorna (markdown_gerado, used_ai). Nunca sobrescreve arquivos sozinho.
-        """
+        """Estrutura os campos preenchidos pelo usuário no painel em um persona.md otimizado."""
         prompt = f"""
 Você é um especialista em posicionamento de marca e tráfego pago Meta Ads.
 Com base EXCLUSIVAMENTE nas respostas preenchidas abaixo pelo usuário (não invente fatos novos),
@@ -162,7 +276,6 @@ Responda em JSON: {{"persona_markdown": "# Persona e Diretrizes da Marca..."}}
         except AIUnavailableError:
             pass
 
-        # Fallback determinístico em Python caso a IA esteja indisponível
         fallback_md = (
             f"# 🎯 Persona e Diretrizes da Marca — {form_data.get('account_name', 'Cliente')}\n\n"
             f"## 1. Sobre o Negócio\n"

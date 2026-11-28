@@ -1,8 +1,8 @@
 """
-Skill: MetaPublisher (Operador Seguro em 2 Etapas).
-- Suporta anúncios de IMAGEM (adimages + link_data) e VÍDEO (advideos + 1º frame como capa + video_data).
-- Cria campanha e conjunto iniciais PAUSADOS para contas virgens (Cold Start).
-- Permite pausar/ativar anúncios, conjuntos ou campanhas validando RulesEngine antes de ativar.
+Skill: MetaPublisher (Operador Seguro em 2 Etapas com Hard Stop Orçamentário Global).
+- Suporta anúncios de IMAGEM e VÍDEO (1º frame como capa).
+- Valida o teto global consolidado da conta (gasto do mês + comprometido ativo CBO/ABO) antes de criar ou ativar.
+- Trata subcódigo 1885183 (App em Modo de Desenvolvimento) com mensagem explicativa.
 """
 import json
 import requests
@@ -55,10 +55,34 @@ class MetaPublisher:
         body = resp.json()
         if resp.status_code != 200 or "error" in body:
             err = body.get("error", body)
-            if isinstance(err, dict) and err.get("code") == 190:
-                raise MetaTokenExpiredError(err.get("message", "Token da Meta expirado."))
+            if isinstance(err, dict):
+                if err.get("code") == 190:
+                    raise MetaTokenExpiredError(err.get("message", "Token da Meta expirado."))
+                if err.get("error_subcode") == 1885183:
+                    raise RuntimeError(
+                        "App Meta em Modo de Desenvolvimento (erro 1885183): "
+                        "acesse developers.facebook.com -> Configurações -> Básico, preencha a URL de Política de Privacidade "
+                        "e alterne o App para Modo Público (Live) para conseguir criar anúncios."
+                    )
             raise RuntimeError(f"Erro Meta API ({resp.status_code}): {err}")
         return body
+
+    def get_consolidated_budget_status(self) -> Dict[str, Any]:
+        """Consulta a Meta API e calcula o orçamento consolidado global da conta."""
+        meta = MetaClient(self.access_token, self.ad_account_id)
+        ins_month = meta.get_insights(date_preset="this_month")
+        ins_today = meta.get_insights(date_preset="today")
+        campaigns = meta.get_campaigns()
+        adsets = meta.get_adsets()
+
+        month_spend = float(ins_month[0].get("spend", 0.0)) if ins_month else 0.0
+        today_spend = float(ins_today[0].get("spend", 0.0)) if ins_today else 0.0
+        return RulesEngine(self.config).evaluate_consolidated_account_budget(
+            spent_this_month=month_spend,
+            spent_today=today_spend,
+            campaigns=campaigns,
+            adsets=adsets,
+        )
 
     def upload_image(self, image_path: Path) -> str:
         """Faz upload da imagem original para a biblioteca da conta e retorna o image_hash."""
@@ -159,14 +183,29 @@ class MetaPublisher:
 
     def create_starter_campaign_and_adset(self, daily_budget_brl: float = None) -> Dict[str, Any]:
         """
-        Para contas virgens (Cold Start): cria 1 Campanha + 1 Conjunto inicial em PAUSED,
-        respeitando o teto mensal e segmentação definidos no painel.
+        Para contas virgens (Cold Start): cria 1 Campanha + 1 Conjunto inicial PAUSED,
+        validando antes contra a folga consolidada global da conta (Hard Stop).
         """
+        budget_status = self.get_consolidated_budget_status()
+        rules = RulesEngine(self.config)
+
+        if budget_status["status"] in ("EXCEEDED", "PROJECTED_EXCEEDED"):
+            raise RuntimeError(
+                f"Criação bloqueada pelo Hard Stop global: {budget_status.get('alert')}"
+            )
+
+        safe_daily = (
+            float(daily_budget_brl)
+            if daily_budget_brl is not None
+            else min(max(6.0, float(budget_status.get("available_daily_budget", 6.0))), 15.0)
+        )
+        commit_check = rules.can_commit_new_daily_budget(budget_status, safe_daily)
+        if not commit_check["allowed"]:
+            raise RuntimeError(commit_check["reason"])
+
         account_name = self.config.get("account_name", "Cliente")
         defaults = self.config.get("campaign_defaults", {})
         objective = defaults.get("objective", "OUTCOME_LEADS")
-        monthly_max = float(self.config.get("budget", {}).get("monthly_max_brl", 200.0))
-        safe_daily = daily_budget_brl if daily_budget_brl is not None else max(6.0, round(monthly_max / 30.0, 2))
         daily_cents = int(round(safe_daily * 100))
 
         targeting_cfg = self.config.get("targeting", {})
@@ -221,22 +260,40 @@ class MetaPublisher:
         self._post(object_id, {"status": "PAUSED"})
         return {"id": object_id, "status": "PAUSED"}
 
-    def activate_object(self, object_id: str) -> Dict[str, Any]:
-        """Ativa anúncio, conjunto ou campanha após validar o teto mensal no RulesEngine."""
-        meta = MetaClient(self.access_token, self.ad_account_id)
+    def activate_object(
+        self,
+        object_id: str,
+        object_type: str = "ad",
+        new_daily_budget_brl: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Ativa anúncio, conjunto ou campanha após validar o orçamento consolidado global da conta.
+        - Anúncio em conjunto já ativo não soma novo gasto diário, mas é bloqueado se a conta já estourou ou projeta estourar.
+        - Conjunto/campanha valida também se o novo orçamento diário cabe na folga real até o fim do mês.
+        """
+        budget_status = self.get_consolidated_budget_status()
         rules = RulesEngine(self.config)
-        insights = meta.get_insights(date_preset="this_month")
-        month_spend = float(insights[0].get("spend", 0.0)) if insights else 0.0
-        health = rules.evaluate_monthly_budget_health(month_spend)
 
-        if health["status"] == "EXCEEDED":
+        if budget_status["status"] == "EXCEEDED":
             raise RuntimeError(
-                f"Ativação bloqueada pelo RulesEngine: gasto mensal (R$ {month_spend:.2f}) "
-                f"já excedeu o teto de R$ {health['monthly_max']:.2f}."
+                f"Ativação bloqueada pelo Hard Stop: gasto no mês (R$ {budget_status['current_month_spend']:.2f}) "
+                f"já atingiu o teto de R$ {budget_status['monthly_max']:.2f}."
             )
 
+        if budget_status["status"] == "PROJECTED_EXCEEDED":
+            raise RuntimeError(
+                f"Ativação bloqueada pelo Hard Stop: os ativos atuais (R$ {budget_status['active_daily_total']:.2f}/dia) "
+                f"já projetam R$ {budget_status['projected_month_total']:.2f} até o fim do mês "
+                f"(acima do teto de R$ {budget_status['monthly_max']:.2f}). Reduza orçamentos antes de ativar."
+            )
+
+        if object_type in ("adset", "campaign") and new_daily_budget_brl > 0:
+            check = rules.can_commit_new_daily_budget(budget_status, new_daily_budget_brl)
+            if not check["allowed"]:
+                raise RuntimeError(check["reason"])
+
         self._post(object_id, {"status": "ACTIVE"})
-        return {"id": object_id, "ad_id": object_id, "status": "ACTIVE", "budget_health": health}
+        return {"id": object_id, "ad_id": object_id, "status": "ACTIVE", "budget_health": budget_status}
 
     def activate_ad(self, ad_id: str) -> Dict[str, Any]:
-        return self.activate_object(ad_id)
+        return self.activate_object(ad_id, object_type="ad")

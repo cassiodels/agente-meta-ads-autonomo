@@ -15,7 +15,8 @@ Você vai precisar de 4 chaves para preencher o arquivo `.env` durante a instala
    - *Importante:* abra o seu bot recém-criado e clique em **Começar** (`/start`) para ele poder te enviar mensagens.
 3. **`META_ACCESS_TOKEN`:**
    - Acesse [developers.facebook.com](https://developers.facebook.com/), crie um App do tipo **Outro → Empresarial** e adicione o produto **Marketing API**.
-   - Em **Marketing API → Ferramentas**, marque as permissões **`ads_management`**, **`ads_read`**, **`pages_manage_ads`** e **`pages_read_engagement`** e clique em **Gerar Token**. *(Não precisa publicar o App; em modo de desenvolvimento já funciona para suas contas).*
+   - **Importante para criar anúncios (evita erro `1885183`):** em **Configurações → Básico**, preencha uma URL de Política de Privacidade e Categoria do App e alterne o App no topo da tela de **Desenvolvimento** para **Modo Público / Ao Vivo (Live)**. *(Para gerenciar contas do seu próprio Business Manager em acesso Standard, ligar o Modo Público já libera a criação de anúncios sem precisar aguardar App Review).*
+   - Em **Marketing API → Ferramentas**, marque **`ads_management`**, **`ads_read`**, **`pages_manage_ads`** e **`pages_read_engagement`** e clique em **Gerar Token**.
 4. **`GEMINI_API_KEY`:**
    - Acesse [aistudio.google.com](https://aistudio.google.com/), clique em **Get API key → Create API key** e copie a chave.
 
@@ -114,7 +115,7 @@ Execute na ordem abaixo para validar tudo em ambiente real:
 
 ### QA 2 — Cadastro de Cliente & Padrões Seguros
 - [ ] Na barra lateral (`➕ Cadastrar Novo Cliente`), informar Nome da Empresa e ID da conta Meta (`act_...`) e clicar em **Criar Cliente**.
-- **Esperado:** Cliente criado com teto mensal padrão **R$ 200,00** e CPA máximo padrão **R$ 10,00**.
+- **Esperado:** Cliente criado com teto mensal global padrão **R$ 200,00** e CPA máximo padrão **R$ 10,00**.
 
 ### QA 3 — Persona em 2 Etapas (Revisão antes de Salvar)
 - [ ] Na aba **🎯 Persona & Regras do Negócio**, preencher os 10 campos (incluindo *Observações e Regras Obrigatórias*).
@@ -125,29 +126,30 @@ Execute na ordem abaixo para validar tudo em ambiente real:
 ### QA 4 — Cold Start (`Autodetectar Ativos`) & Configurações
 - [ ] Na aba **⚙️ Configurações, Travas & Tokens**, clicar em **🔍 Autodetectar Ativos da Conta (Cold Start)**.
 - [ ] Conferir Página, Instagram, Formulário, Campanha e Conjunto preenchidos (ou preencher manualmente se for conta virgem) e clicar em **💾 Salvar Todas as Configurações**.
-- **Esperado:** Tudo salvo sem erros.
+- **Esperado:** Tudo salvo sem erros (inclusive atualização do `.env` sem `Errno 16`).
 
-### QA 5 — Upload Múltiplo de Imagem e Vídeo pelo Painel
-- [ ] Na aba **📊 Visão Geral & Criativos**, enviar **1 imagem (`.png`/`.jpg`)** e **1 vídeo curto (`.mp4`)** (com o 1º frame sendo a capa desejada).
-- [ ] Testar o botão **🗑️ Remover** em um arquivo de teste descartável.
-- **Esperado:** Arquivos listados corretamente na tela.
+### QA 5 — Upload Múltiplo, Catalogação com IA & Remoção Permanente (Painel Web)
+- [ ] Na aba **📊 Visão Geral & Criativos**, enviar **1 imagem (`.png`/`.jpg`)** e **1 vídeo curto (`.mp4`)** (com o 1º frame sendo a capa desejada), além de **1 arquivo descartável** para testar remoção.
+- [ ] Clicar em **🗑️ Remover** no arquivo descartável.
+- [ ] Clicar em **🧠 Catalogar Criativos Novos com IA**.
+- **Esperado:** O arquivo descartável some imediatamente da tela e do disco (sem reaparecer após o reload) e os criativos restantes ficam marcados como `✅ Catalogado` com resumo e recomendação de uso.
 
-### QA 6 — Central no Telegram & Diagnóstico Real
-- [ ] No Telegram, enviar `/menu` para o bot e clicar em **Auditar &lt;Nome do Cliente&gt;**.
-- **Esperado:** Exibe gasto real, `frequency` real e diagnóstico do `AdAuditor` (ou opção de criar campanha/conjunto inicial `PAUSED` se a conta for virgem).
+### QA 6 — Central no Telegram & Orçamento Consolidado Real
+- [ ] No **Telegram**, enviar `/menu` para o bot e clicar em **Auditar &lt;Nome do Cliente&gt;**.
+- **Esperado:** Exibe o bloco **Orçamento Consolidado da Conta** (Teto Mensal, Gasto no Mês, Ativos Hoje/dia, Projeção Fim do Mês, Folga Real e Topologia recomendada) e o diagnóstico real do `AdAuditor`.
 
-### QA 7 — Fluxo de Vídeo + Preview do 1º Frame + Botão `✏️ Ajustar`
-- [ ] Clicar em **✨ Analisar criativo e gerar copy** selecionando o vídeo (ou imagem).
-- [ ] Conferir que chegou no Telegram a **foto do 1º frame** (`[VÍDEO - Capa: 1º Frame]`) e a copy alinhada com a Persona.
-- [ ] Clicar em **✏️ Ajustar**, enviar uma instrução curta e aguardar a nova versão.
-- **Esperado:** Copy reescrita e aprendizado salvo no `memory.json`.
+### QA 7 — Escolha Autônoma do Criativo + Preview do 1º Frame + `✏️ Ajustar` / `🔀 Trocar Criativo` (Telegram)
+- [ ] Ainda dentro da conta no **Telegram**, clicar em **✨ Sugerir Melhor Criativo e Gerar Copy**.
+- [ ] Conferir que o agente escolheu autonomamente o criativo do catálogo explicando o motivo estratégico (`🧠 Escolha estratégica`), enviou o **1º frame** se for vídeo (`[VÍDEO - Capa: 1º Frame]`) e gerou a copy alinhada à Persona.
+- [ ] Testar o botão **✏️ Ajustar** enviando uma instrução curta (e, se houver mais de 1 criativo, testar opcionalmente **🔀 Trocar Criativo**).
+- **Esperado:** Copy reescrita com aprendizado salvo em `memory.json`, e troca de criativo funcionando sem erros.
 
-### QA 8 — Publicação em 2 Etapas na Meta (`PAUSED` → `ACTIVE`)
-- [ ] Clicar em **✅ Aprovar** na proposta.
-- [ ] Conferir pelos IDs retornados (ou no Gerenciador de Anúncios) que o anúncio entrou como **PAUSADO** (gasto R$ 0,00) e com o **1º frame** como capa.
-- [ ] Decidir entre **🚀 Ativar Anúncio Agora** ou **🔙 Manter Pausado e Voltar**.
+### QA 8 — Publicação em 2 Etapas na Meta (`PAUSED` → `ACTIVE`) & Trava Global
+- [ ] Clicar em **✅ Aprovar** na proposta no **Telegram** (lembrando que o App no Meta Developers precisa estar em **Modo Público / Live**).
+- [ ] Conferir pelos IDs retornados (e no Gerenciador de Anúncios) que o anúncio entrou como **PAUSADO** (gasto R$ 0,00) com o **1º frame** como capa (se vídeo).
+- [ ] Decidir entre **🚀 Ativar Anúncio Agora** (validado pelo Hard Stop global da conta) ou **🔙 Manter Pausado e Voltar**.
 
 ### QA 9 — Rotina Diária, Relatório Mensal & Atualização Segura
-- [ ] Rodar na VPS: `docker compose exec -T bot python main.py` e confirmar entrega da Central no Telegram.
+- [ ] Rodar na VPS: `docker compose exec -T bot python main.py` e confirmar entrega da Central consolidada no Telegram.
 - [ ] Rodar na VPS: `docker compose exec -T bot python -m core.skills.monthly_report` e confirmar geração do relatório mensal + envio no Telegram.
 - [ ] Rodar `git pull origin main` e confirmar que `.env` e `accounts/` permanecem intactos.

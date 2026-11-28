@@ -1,8 +1,9 @@
 """
 Painel de Controle Visual do Agente de IA Meta Ads (Streamlit).
 100% compatível com uso local (PC) e remoto (VPS).
-Centraliza onboarding, upload múltiplo de criativos, Persona estruturada revisável com IA,
-todas as travas de orçamento/aprendizado, ativos Meta e atualizações sem tocar em arquivos ou código.
+- Correção do QA 5: uploader com chave dinâmica limpa após salvar (evita regravação no rerun) + chmod em volumes Docker.
+- Catálogo inteligente de criativos (assets_catalog.json): analisa cada mídia 1 única vez com IA.
+- Persona em 10 campos com revisão antes de salvar + teto mensal consolidado global da conta.
 """
 import json
 import os
@@ -13,14 +14,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 import streamlit as st
 
-from core.skills.copy_refiner import CopyRefiner
+from core.asset_manager import AssetManager
+from core.skills.copy_refiner import CopyRefiner, AIUnavailableError
 
 load_dotenv(override=True)
 
 
 def _update_env_in_place(env_path: Path, updates: dict) -> None:
-    """Atualiza chaves diretamente no arquivo .env sem usar arquivo temporário/os.replace
-    (evita Errno 16 Device or resource busy em bind mounts de arquivo único no Docker)."""
+    """Atualiza chaves diretamente no arquivo .env sem os.replace (compatível com volume Docker)."""
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     remaining = {k: str(v).strip() for k, v in updates.items()}
     new_lines = []
@@ -39,6 +40,14 @@ def _update_env_in_place(env_path: Path, updates: dict) -> None:
     for key, val in updates.items():
         os.environ[key] = str(val).strip()
 
+
+def _relax_perms(path: Path, mode: int = 0o666) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 ACCOUNTS_DIR = BASE_DIR / "accounts"
@@ -48,7 +57,6 @@ DOCS_DIR = BASE_DIR / "docs"
 OBJECTIVES = ["OUTCOME_LEADS", "OUTCOME_TRAFFIC", "OUTCOME_ENGAGEMENT", "OUTCOME_SALES"]
 CTAS = ["APPLY_NOW", "LEARN_MORE", "SEND_WHATSAPP_MESSAGE", "SHOP_NOW"]
 GENDERS = ["todos", "masculino", "feminino"]
-MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".mp4", ".mov", ".m4v", ".avi"}
 
 st.set_page_config(page_title="Agente Meta Ads", page_icon="🤖", layout="wide")
 st.title("🤖 Painel de Gestão — Agente Meta Ads")
@@ -103,7 +111,7 @@ if not available_accounts:
         "👋 Bem-vindo! Nenhum cliente cadastrado ainda.\n\n"
         "**Passo 1:** Cadastre seu primeiro cliente na barra lateral à esquerda (`➕ Cadastrar Novo Cliente`).\n"
         "**Passo 2:** Preencha a **Persona & Regras do Negócio** e aprove o texto gerado pela IA.\n"
-        "**Passo 3:** Configure seus tokens na aba **Configurações**, use **Autodetectar Ativos** e envie seus criativos!"
+        "**Passo 3:** Configure seus tokens na aba **Configurações**, use **Autodetectar Ativos**, envie e catalogue seus criativos!"
     )
     st.stop()
 
@@ -124,7 +132,6 @@ defaults_cfg = config_data.setdefault("campaign_defaults", {"objective": "OUTCOM
 target_cfg = config_data.setdefault("targeting", {"country": "BR", "region_note": "Brasil inteiro", "age_min": 18, "age_max": 55, "gender": "todos"})
 meta_assets = config_data.setdefault("meta_assets", {})
 
-# Abas Principais (100% sem código)
 tab_dashboard, tab_persona, tab_config, tab_update = st.tabs([
     "📊 Visão Geral & Criativos",
     "🎯 Persona & Regras do Negócio",
@@ -139,37 +146,90 @@ with tab_dashboard:
     max_cpa = float(guard_cfg.get("max_acceptable_cpa_brl", 10.0))
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Teto Mensal", f"R$ {monthly_max:.2f}")
+    col1.metric("Teto Mensal Global da Conta", f"R$ {monthly_max:.2f}")
     col2.metric("CPA Máximo", f"R$ {max_cpa:.2f}")
     col3.metric("Conta Meta", config_data.get("meta_ad_account_id", "-"))
     col4.metric("Objetivo Padrão", defaults_cfg.get("objective", "OUTCOME_LEADS"))
+    st.caption("🛡️ O Teto Mensal vale para a conta inteira consolidada (gasto no mês + comprometido ativo de todas as campanhas/conjuntos).")
 
     st.write("---")
-    st.subheader("🎨 Enviar Criativos (Imagens ou Vídeos)")
-    st.caption("Funciona tanto no PC quanto na VPS. Para vídeos, o 1º frame será usado como capa e preview no Telegram.")
+    st.subheader("🎨 Enviar e Catalogar Criativos (Imagens ou Vídeos)")
+    st.caption("Suba seus criativos e clique em 'Catalogar Criativos Novos com IA'. O agente lê cada mídia 1 única vez e escolhe a melhor sozinho no Telegram.")
+
+    nonce_key = f"uploader_nonce_{selected_account}"
+    if nonce_key not in st.session_state:
+        st.session_state[nonce_key] = 0
+
+    msg_key = f"last_upload_msg_{selected_account}"
+    if msg_key in st.session_state:
+        st.success(st.session_state.pop(msg_key))
+
     uploads = st.file_uploader(
         "Selecione uma ou várias mídias (PNG, JPG, MP4, MOV):",
         type=["png", "jpg", "jpeg", "mp4", "mov"],
         accept_multiple_files=True,
+        key=f"up_{selected_account}_{st.session_state[nonce_key]}",
     )
-    assets_dir = account_path / "assets"
+    asset_mgr = AssetManager(account_path)
+    assets_dir = asset_mgr.assets_dir
     assets_dir.mkdir(parents=True, exist_ok=True)
+    _relax_perms(assets_dir, 0o777)
+
     if uploads:
         saved = []
         for up in uploads:
-            (assets_dir / up.name).write_bytes(up.getbuffer())
+            dest = assets_dir / up.name
+            dest.write_bytes(up.getbuffer())
+            _relax_perms(dest, 0o666)
             saved.append(up.name)
-        st.success(f"✅ {len(saved)} arquivo(s) salvo(s): {', '.join(saved)}")
+        st.session_state[nonce_key] += 1
+        st.session_state[msg_key] = f"✅ {len(saved)} arquivo(s) salvo(s): {', '.join(saved)}"
+        st.rerun()
 
-    existing_media = sorted(f for f in assets_dir.iterdir() if f.is_file() and f.suffix.lower() in MEDIA_EXTS)
+    uncataloged = asset_mgr.get_uncataloged_assets()
+    if uncataloged:
+        if st.button(f"🧠 Catalogar Criativos Novos com IA ({len(uncataloged)} pendente(s))"):
+            gemini_key = os.getenv("GEMINI_API_KEY", "")
+            if not gemini_key:
+                st.error("⚠️ Configure a GEMINI_API_KEY na aba Configurações antes de catalogar.")
+            else:
+                refiner = CopyRefiner(persona_text, {}, gemini_key)
+                catalog = asset_mgr.load_catalog()
+                ok_count = 0
+                with st.spinner(f"Analisando {len(uncataloged)} mídia(s) com IA (1 única vez por arquivo)..."):
+                    for media_path in uncataloged:
+                        try:
+                            catalog[media_path.name] = refiner.catalog_media(media_path)
+                            ok_count += 1
+                        except AIUnavailableError as e:
+                            st.error(f"Gemini indisponível ao analisar {media_path.name}: {e}")
+                            break
+                        except Exception as e:
+                            st.error(f"Erro ao catalogar {media_path.name}: {e}")
+                asset_mgr.save_catalog(catalog)
+                _relax_perms(asset_mgr.catalog_file, 0o666)
+                if ok_count > 0:
+                    st.success(f"✅ {ok_count} criativo(s) catalogado(s) com sucesso!")
+                    st.rerun()
+
+    existing_media = asset_mgr.list_all_media()
+    catalog = asset_mgr.load_catalog()
     if existing_media:
         st.markdown("**Arquivos salvos na pasta de criativos:**")
         for f in existing_media:
-            c_name, c_del = st.columns([5, 1])
+            entry = catalog.get(f.name)
+            c_name, c_status, c_del = st.columns([3, 4, 1])
             c_name.write(f"• `{f.name}` ({round(f.stat().st_size / 1024, 1)} KB)")
+            if entry:
+                c_status.caption(f"✅ Catalogado: {entry.get('theme', '')} — {entry.get('best_for', '')}")
+            else:
+                c_status.caption("⏳ Pendente de catalogação")
             if c_del.button("🗑️ Remover", key=f"del_{selected_account}_{f.name}"):
-                f.unlink(missing_ok=True)
-                st.rerun()
+                try:
+                    asset_mgr.remove_asset(f.name)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Não foi possível remover `{f.name}`: {e}")
     else:
         st.info("Nenhum criativo enviado ainda para esta conta.")
 
@@ -253,7 +313,6 @@ with tab_persona:
     )
     if st.button("✅ Aprovar e Salvar Persona Oficial"):
         persona_file.write_text(edited_persona, encoding="utf-8")
-        # Sincronizar defaults de campanha se formulário já tiver sido salvo
         if persona_form_file.exists():
             saved_form = json.loads(persona_form_file.read_text(encoding="utf-8"))
             config_data["campaign_defaults"] = {
@@ -292,7 +351,7 @@ with tab_config:
         with c1:
             acc_name = st.text_input("Nome da Empresa:", value=config_data.get("account_name", selected_account))
             new_act_id = st.text_input("ID da Conta de Anúncios (act_...):", value=config_data.get("meta_ad_account_id", ""))
-            new_budget = st.number_input("Teto Máximo Mensal (R$):", min_value=50.0, max_value=100000.0,
+            new_budget = st.number_input("Teto Máximo Mensal da Conta (R$):", min_value=50.0, max_value=100000.0,
                                          value=float(budget_cfg.get("monthly_max_brl", 200.0)), step=50.0)
             new_cpa = st.number_input("CPA Máximo Aceitável (R$):", min_value=1.0, max_value=5000.0,
                                       value=float(guard_cfg.get("max_acceptable_cpa_brl", 10.0)), step=1.0)

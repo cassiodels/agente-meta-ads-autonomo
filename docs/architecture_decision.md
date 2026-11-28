@@ -142,6 +142,8 @@ Para que qualquer pessoa (mesmo sem conhecimento de código ou terminal) consiga
 - **Criação Inicial `PAUSED`:** `MetaPublisher.create_starter_campaign_and_adset` cria campanha e conjunto iniciais pausados para contas virgens usando a segmentação e orçamento do painel.
 - **Regras Agnósticas ao Nicho:** Removido qualquer hardcode de nicho do `ComplianceGuard`; particularidades ficam no campo livre *Observações e Regras Obrigatórias* da Persona.
 - **Painel 100% Sem Código:** `app.py` (local & VPS) centraliza onboarding, upload múltiplo de mídias, revisão editável da Persona otimizada por IA antes de salvar oficialmente, travas, segmentação, ativos e atualização via `git pull`.
+- **Catálogo Pré-Analisado de Criativos (`assets_catalog.json`):** O usuário sobe várias mídias e cataloga 1 única vez com IA pelo painel; no Telegram, o agente escolhe autonomamente o melhor criativo cruzando catálogo + insights da conta (sem reenviar imagens) e oferece o botão `🔀 Trocar Criativo`.
+- **Trava Orçamentária Global Consolidada (`act_...`):** `RulesEngine.evaluate_consolidated_account_budget` soma o gasto realizado no mês + orçamento comprometido das campanhas CBO e conjuntos ABO ativos (sem dupla contagem), com Hard Stop programático no `MetaPublisher`.
 
 ---
 

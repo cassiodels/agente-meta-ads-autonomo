@@ -1,6 +1,6 @@
 """
 Central de Gestão Multi-Cliente (Agency Hub).
-Compila métricas reais de todas as contas (incluindo nível de anúncio, frequency e orçamento),
+Compila métricas reais de todas as contas (incluindo nível de anúncio, frequency e orçamento consolidado),
 detecta token expirado (190) e gera a mensagem da Central de Operações para o Telegram.
 """
 from pathlib import Path
@@ -19,7 +19,7 @@ class AgencyHub:
         self.meta_token = meta_token
 
     def scan_all_accounts_overview(self) -> List[Dict[str, Any]]:
-        """Varre todas as contas ativas e gera diagnóstico crítico com métricas reais."""
+        """Varre todas as contas ativas e gera diagnóstico crítico com orçamento consolidado."""
         overview_list: List[Dict[str, Any]] = []
 
         for folder in sorted(self.accounts_dir.iterdir()):
@@ -40,10 +40,11 @@ class AgencyHub:
             rules = RulesEngine(config=cfg)
             asset_mgr = AssetManager(account_dir=folder)
             new_assets = asset_mgr.scan_new_assets()
+            cataloged_entries = asset_mgr.get_available_cataloged_entries()
 
             spend_today = 0.0
             month_spend = 0.0
-            budget_health = rules.evaluate_monthly_budget_health(0.0)
+            budget_health = rules.evaluate_consolidated_account_budget(0.0, 0.0, [], [])
             pending_action = None
             status_icon = "🟢"
             token_expired = False
@@ -54,6 +55,7 @@ class AgencyHub:
                 insights_month = meta.get_insights(date_preset="this_month")
                 insights_7d = meta.get_insights(date_preset="last_7d")
                 campaigns = meta.get_campaigns()
+                adsets = meta.get_adsets()
                 ad_insights = meta.get_ad_insights(date_preset="last_7d")
                 ads = meta.get_ads()
 
@@ -61,7 +63,13 @@ class AgencyHub:
                     spend_today = float(insights_today[0].get("spend", 0.0))
                 if insights_month:
                     month_spend = float(insights_month[0].get("spend", 0.0))
-                budget_health = rules.evaluate_monthly_budget_health(month_spend)
+
+                budget_health = rules.evaluate_consolidated_account_budget(
+                    spent_this_month=month_spend,
+                    spent_today=spend_today,
+                    campaigns=campaigns,
+                    adsets=adsets,
+                )
 
                 data_7d = insights_7d[0] if insights_7d else {}
                 evaluation = auditor.evaluate_account_strategy(
@@ -77,6 +85,13 @@ class AgencyHub:
                     status_icon = "🚨"
                     pending_action = {
                         "action": "ORCAMENTO_EXCEDIDO",
+                        "reason": budget_health["alert"],
+                        "briefing": None,
+                    }
+                elif budget_health["status"] == "PROJECTED_EXCEEDED":
+                    status_icon = "⚠️"
+                    pending_action = {
+                        "action": "PROJECAO_ACIMA_TETO",
                         "reason": budget_health["alert"],
                         "briefing": None,
                     }
@@ -99,16 +114,20 @@ class AgencyHub:
                 "spend_today": spend_today,
                 "month_spend": month_spend,
                 "monthly_max": budget_health["monthly_max"],
+                "active_daily_total": budget_health["active_daily_total"],
+                "projected_month_total": budget_health["projected_month_total"],
+                "available_monthly_budget": budget_health["available_monthly_budget"],
                 "budget_health": budget_health,
                 "pending_action": pending_action,
                 "available_assets_count": len(new_assets),
+                "cataloged_count": len(cataloged_entries),
                 "token_expired": token_expired,
             })
 
         return overview_list
 
     def format_central_menu(self, overview_list: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Formata o texto e os botões inline da Central de Operações."""
+        """Formata o texto consolidado e os botões inline da Central de Operações."""
         lines = [
             "🏢 *CENTRAL DE OPERAÇÕES — AGÊNCIA META ADS*",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -121,8 +140,9 @@ class AgencyHub:
             action_desc = "OK" if not item["pending_action"] else item["pending_action"]["action"]
             lines.append(
                 f"{item['status_icon']} *{idx}. {item['account_name']}*\n"
-                f"   • Hoje: R$ {item['spend_today']:.2f} | Mês: R$ {item['month_spend']:.2f}/R$ {item['monthly_max']:.2f}\n"
-                f"   • Status: `{action_desc}` | Novos criativos: {item['available_assets_count']}"
+                f"   • Hoje: R$ {item['spend_today']:.2f} | Mês: R$ {item['month_spend']:.2f}\n"
+                f"   • Projeção: R$ {item['projected_month_total']:.2f} / Teto: R$ {item['monthly_max']:.2f} | Folga: R$ {item['available_monthly_budget']:.2f}\n"
+                f"   • Status: `{action_desc}` | Criativos: {item['available_assets_count']} ({item['cataloged_count']} catalogados)"
             )
             buttons.append([
                 {"text": f"Auditar {item['account_name']}", "callback_data": f"audit_{item['folder_name']}"}
